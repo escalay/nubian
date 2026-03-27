@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# OCR output (regenerable, large)
+pipeline/ocr_output/
+
+# Environment
+local.env
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large binary files — track with Git LFS or keep outside repo
+books/*.pdf
