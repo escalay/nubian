@@ -179,15 +179,17 @@ def strip_tags(html: str) -> str:
 
 def extract_headword(li_html: str) -> tuple[str, str]:
     """Extract headword (first text before any <i> tag) and the rest of the entry."""
-    # The headword is the text before the first italic tag
     match = re.match(r'^(.*?)<i', li_html, re.DOTALL)
     if match:
         hw = strip_tags(match.group(1)).strip().rstrip('.')
         rest = li_html[match.start():]
-        return hw, rest
+    else:
+        hw = strip_tags(li_html).split('.')[0].strip()
+        rest = li_html
 
-    # No italic — whole thing is the entry
-    return strip_tags(li_html).split('.')[0].strip(), li_html
+    # Strip trailing dialect codes from headword (e.g., "deg DM" → "deg")
+    hw = re.sub(r'\s+(' + '|'.join(re.escape(c.rstrip('.')) for c in DIALECT_CODES) + r')\.?\s*$', '', hw)
+    return hw.strip(), rest
 
 
 def extract_dialects(text: str) -> list[str]:
@@ -200,33 +202,195 @@ def extract_dialects(text: str) -> list[str]:
 
 
 def extract_pos(text: str) -> str:
-    """Extract part of speech."""
-    for pos in sorted(POS_TAGS, key=len, reverse=True):
-        if pos in text:
-            return pos.rstrip('.')
-    return ""
+    """Extract part of speech — takes the FIRST occurrence near the start of the entry."""
+    # Only look in the first ~80 chars (after headword + dialect, before the definition body)
+    early = text[:80]
+    best_pos = ""
+    best_idx = 999
+    for pos in POS_TAGS:
+        idx = early.find(pos)
+        if idx >= 0 and idx < best_idx:
+            best_idx = idx
+            best_pos = pos
+    return best_pos.rstrip('.') if best_pos else ""
+
+
+# All markers that signal the start of cognate/comparative text
+_COGNATE_BOUNDARY = re.compile(
+    r'\b(?:HAM\.|ham\.|AR\.|ar\.|SEM\.|sem\.|NIL\.|nil\.|CENT\.|EG\.|SUD\.|'
+    r'Cf\.|cf\.|Copt\.|Bed\.|Som\.|Bil\.|Qu\.|Sa\.|Ga\.|'
+    r'Haus\.|Ba\.|Mas\.|Kham\.|Barea|Nan\.|'
+    r'HA [A-Z]|SE [A-Z])',  # truncated markers at line breaks
+)
+
+# Markers for cross-references: "s. word" meaning "see word"
+_XREF = re.compile(r'\bs\.\s+[a-záéíóúāēīōūǎǐǒǔ]')
 
 
 def extract_cognates(text: str) -> list[Cognate]:
-    """Extract comparative cognates from the right column."""
+    """Extract comparative cognates from the right-column text."""
     cognates = []
     for marker, language in COGNATE_MARKERS.items():
-        pattern = re.compile(re.escape(marker) + r'\s*([^.;]+(?:\.[^.;]*)?)')
-        for m in pattern.finditer(text):
-            form = m.group(1).strip().rstrip('.')
-            if form and len(form) > 1:
-                cognates.append(Cognate(language=language, form=form))
+        if marker in ("Cf.", "cf."):
+            # For cf./Cf., check what language follows
+            for m in re.finditer(re.escape(marker) + r'\s*(.{3,60})', text):
+                remainder = m.group(1).strip()
+                # Check if a real language marker follows
+                real_lang = None
+                for sub_marker, sub_lang in COGNATE_MARKERS.items():
+                    if sub_marker in ("Cf.", "cf."):
+                        continue
+                    if remainder.startswith(sub_marker):
+                        real_lang = sub_lang
+                        remainder = remainder[len(sub_marker):].strip()
+                        break
+                form = re.split(r'[.;]', remainder)[0].strip()
+                if form and len(form) > 1:
+                    cognates.append(Cognate(
+                        language=real_lang or "compare",
+                        form=form,
+                    ))
+        else:
+            for m in re.finditer(re.escape(marker) + r'\s*([^.;]{2,50})', text):
+                form = m.group(1).strip().rstrip('.')
+                if form:
+                    cognates.append(Cognate(language=language, form=form))
     return cognates
 
 
+def clean_definition(raw_def: str, headword: str) -> str:
+    """Extract clean English meaning from raw definition text.
+
+    The raw text often has: dialect codes, variant Nubian forms, cognate text,
+    cross-references, and usage examples all mixed together. We extract just
+    the English meaning.
+    """
+    text = raw_def
+
+    # 1. Remove the headword itself
+    text = text.replace(headword, "", 1)
+
+    # 2. Remove all dialect codes
+    for code in DIALECT_CODES:
+        text = text.replace(code, " ")
+    # Also remove bare dialect codes without period (K, M, D, KD, KDM...)
+    text = re.sub(r'^[KDM]{1,3}\s+', '', text.strip())
+
+    # 3. Remove POS tags
+    for p in POS_TAGS:
+        text = text.replace(p, " ", 1)
+
+    # 4. Truncate at cognate boundaries (right-column material)
+    m = _COGNATE_BOUNDARY.search(text)
+    if m:
+        text = text[:m.start()]
+
+    # 5. Truncate at cross-references: "s. word"
+    m = _XREF.search(text)
+    if m and m.start() > 10:
+        text = text[:m.start()]
+
+    # 6. Take only the core meaning (before first — which introduces variant forms)
+    # But keep the first part which is the actual definition
+    if '—' in text:
+        parts = text.split('—')
+        # First part before — is the definition. Rest are compounds/variants.
+        text = parts[0]
+
+    # 7. Clean up
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = text.strip('.,;:— ')
+
+    # 8. Remove leading Nubian word forms that leaked (non-English words)
+    # Only strip words containing diacritics (āēīōūáéíóú) — English words don't have those
+    _HAS_DIACRITIC = re.compile(r'[āēīōūáéíóúǎǐǒǔñšžčḍṭṣḥ]')
+    for _ in range(5):
+        # "or hagō stalk" → "stalk" (strip "or + diacritic-word")
+        m = re.match(r'^or\s+(\S+)\s+', text)
+        if m and _HAS_DIACRITIC.search(m.group(1)):
+            text = text[m.end():]
+            continue
+        # "ágara-kir put" → "put" (strip leading word WITH diacritics)
+        m = re.match(r'^(\S+)\s*[,;]\s*', text)
+        if m and _HAS_DIACRITIC.search(m.group(1)):
+            text = text[m.end():]
+            continue
+        # Compound with hyphen containing diacritics: "ágara-kir put"
+        m = re.match(r'^(\S*-\S+)\s+(?=[a-z])', text)
+        if m and _HAS_DIACRITIC.search(m.group(1)):
+            text = text[m.end():]
+            continue
+        # "(Munz.)" "(Almkv.)" "(Rein.)" source references
+        text = re.sub(r'^\([A-Z][a-z]+\.?\)\s*', '', text)
+        break
+
+    # 9. Remove trailing truncated cognate fragments
+    text = re.sub(r'\s+HA\s*$', '', text)
+    text = re.sub(r'\s+SE\s*$', '', text)
+    text = re.sub(r'\s+and\s*$', '', text)
+
+    # 10. Remove Arabic/Coptic script characters (Old Nubian forms, not English)
+    text = re.sub(r'[\u0600-\u06FF\u2C80-\u2CFF\u0370-\u03FF]+\s*', '', text)
+
+    # 11. Clean up again after all stripping
+    text = re.sub(r'\s+', ' ', text).strip().strip('.,;:— ')
+
+    return text.strip()
+
+
+_HAS_DIACRITIC = re.compile(r'[āēīōūáéíóúǎǐǒǔñšžčḍṭṣḥ]')
+
+
+def split_meanings(definition: str) -> list[str]:
+    """Split a cleaned definition into multiple English meanings.
+
+    'penis, nail' → ['penis', 'nail']
+    'heart, soul, mind, self' → ['heart', 'soul', 'mind', 'self']
+    """
+    if not definition:
+        return []
+
+    # Split on '; ' first (stronger separator), then ', '
+    parts = re.split(r'\s*;\s*', definition)
+    meanings = []
+    for part in parts:
+        sub_parts = re.split(r',\s+(?![^(]*\))', part)
+        for sp in sub_parts:
+            sp = sp.strip().strip('.,;: ')
+            if not sp or len(sp) < 2:
+                continue
+
+            # Clean each meaning: strip leading Nubian forms (words with diacritics)
+            words = sp.split()
+            while words and _HAS_DIACRITIC.search(words[0]):
+                words.pop(0)
+            sp = " ".join(words).strip()
+
+            # Strip source refs like "(Munz.)" "(Almkv.)" "(Rein.)"
+            sp = re.sub(r'\([A-Z][a-z]+\.?\)', '', sp).strip()
+
+            # Strip O.N. references and any remaining cognate fragments
+            sp = re.sub(r'^O\.N\.\s*', '', sp)
+            sp = re.sub(r'\bO\.N\.\s*', '', sp)
+
+            # Skip meanings that are just cognate references or cross-refs
+            if re.match(r'^(s\.\s|cf\.\s|Cf\.\s|in\s+\S+$|only in|or\s+$|\?\s*$)', sp):
+                continue
+
+            if sp and len(sp) > 1 and not sp.startswith('HA ') and not sp.startswith('SE '):
+                meanings.append(sp)
+
+    return meanings if meanings else [definition]
+
+
 def parse_entry(li_html: str, page_number: int, entry_idx: int) -> Optional[NubianEntry]:
-    """Parse a single <li> entry into a NubianEntry."""
+    """Parse a single <li> or <p> entry into a NubianEntry."""
     headword, rest = extract_headword(li_html)
 
-    if not headword or len(headword) > 80:
+    if not headword or len(headword) > 40:
         return None
 
-    # Skip page headers like "abā—abi-n" or "a—aba"
+    # Skip page headers like "abā—abi-n"
     if re.match(r'^[a-zā-ž].*—[a-zā-ž]', headword):
         return None
 
@@ -235,30 +399,14 @@ def parse_entry(li_html: str, page_number: int, entry_idx: int) -> Optional[Nubi
     dialects = extract_dialects(full_text)
     pos = extract_pos(full_text)
     cognates = extract_cognates(full_text)
-
-    # Extract definition: text after POS and dialect, before cognate markers
-    definition = ""
-    # Remove headword, dialect codes, POS from the text to get definition
-    def_text = full_text
-    for code in DIALECT_CODES:
-        def_text = def_text.replace(code, "")
-    for p in POS_TAGS:
-        def_text = def_text.replace(p, "", 1)
-    # Remove cognate sections (AR., HAM., etc.)
-    for marker in COGNATE_MARKERS:
-        idx = def_text.find(marker)
-        if idx > 0:
-            def_text = def_text[:idx]
-    def_text = def_text.replace(headword, "", 1).strip().lstrip('.').strip()
-    if def_text:
-        definition = re.sub(r'\s+', ' ', def_text).strip()
+    definition = clean_definition(full_text, headword)
 
     entry = NubianEntry(
         id=f"murray_{page_number}_{entry_idx}",
         entry_type="word",
         headword=headword,
         part_of_speech=pos,
-        english=[definition] if definition else [],
+        english=split_meanings(definition),
         cognates=cognates,
         sources=[SourceRef(
             book="murray",
@@ -279,14 +427,57 @@ def parse_entry(li_html: str, page_number: int, entry_idx: int) -> Optional[Nubi
     return entry
 
 
+def _is_cognate_only(p_html: str) -> bool:
+    """Check if a <p> block is just a cognate/comparative line (right column)."""
+    text = strip_tags(p_html).strip()
+    # Starts with a language marker
+    if re.match(r'^(HAM\.|AR\.|ar\.|SEM\.|NIL\.|CENT\.|EG\.|SUD\.|Cf\.|cf\.)', text):
+        return True
+    # Starts with a sub-language (Bed., Som., Kham., Copt., etc.)
+    if re.match(r'^(Bed\.|Som\.|Kham\.|Copt\.|Bil\.|Qu\.|Sa\.|Ba\.|Haus\.|Mas\.|Nan\.)', text):
+        return True
+    # Just a cross-reference: "s. word."
+    if re.match(r'^s\.\s+[a-záéíóúāēīōūǎǐǒǔ]', text):
+        return True
+    return False
+
+
+def extract_p_blocks(html: str) -> list[str]:
+    """Extract <p> tag contents as raw HTML strings."""
+    return re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL)
+
+
 def parse_page(html: str, page_number: int) -> list[NubianEntry]:
-    """Parse all entries from a page's HTML."""
+    """Parse all entries from a page's HTML.
+
+    Tries <li> items first. Falls back to <p> blocks for pages where
+    the OCR didn't produce list items.
+    """
     parser = LiExtractor()
     parser.feed(html)
 
+    items = parser.items
+
+    # Fallback: if no <li> items, use <p> blocks
+    if not items:
+        p_blocks = extract_p_blocks(html)
+        # Filter out cognate-only <p> blocks and merge them into previous entry
+        merged = []
+        for p_html in p_blocks:
+            p_html = p_html.strip()
+            if not p_html:
+                continue
+            if _is_cognate_only(p_html):
+                # Attach cognate text to the previous entry
+                if merged:
+                    merged[-1] += " " + p_html
+            else:
+                merged.append(p_html)
+        items = merged
+
     entries = []
-    for idx, li_html in enumerate(parser.items):
-        entry = parse_entry(li_html, page_number, idx)
+    for idx, item_html in enumerate(items):
+        entry = parse_entry(item_html, page_number, idx)
         if entry:
             entries.append(entry)
 
@@ -352,9 +543,10 @@ def main():
     for e in all_entries:
         e.english = [re.sub(r'\s+', ' ', d).strip() for d in e.english]
 
-    # Save
-    print(f"\nStage 4: Saving {len(all_entries)} entries...")
-    output_path = str(output_dir / "murray_parsed.json")
+    # Save — versioned output so we can compare iterations
+    version = "v7"
+    print(f"\nStage 4: Saving {len(all_entries)} entries ({version})...")
+    output_path = str(output_dir / f"murray_parsed_{version}.json")
     save_entries(all_entries, output_path, "murray")
 
     # Stats
