@@ -59,7 +59,7 @@ const PageExtraction = z.object({
 // ─────────────────────────────────────────────────────────────
 
 const extractPage = ai.fn({
-  model: 'google/gemini-2.5-flash',
+  model: 'google/gemini-3-flash-preview',
   system: `You are an expert Nubian lexicographer extracting dictionary entries from G.W. Murray's 1923 "An English-Nubian Comparative Dictionary".
 
 Each page has a two-column layout:
