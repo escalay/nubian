@@ -4,7 +4,8 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# OCR output (regenerable, large)
+# Pipeline output (regenerable, large)
+output/
 pipeline/ocr_output/
 
 # Environment
