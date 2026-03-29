@@ -257,6 +257,26 @@ def _parse_entry_content(entry: dict, html: str):
         if clean and len(clean) > 1:
             entry['english'].append(clean)
 
+    # Fallback: if no italic definitions found but POS exists,
+    # extract English from text after POS tag
+    if not entry['english'] and entry['pos']:
+        pos_idx = text.find(entry['pos'] + '.')
+        if pos_idx >= 0:
+            after_pos = text[pos_idx + len(entry['pos']) + 1:].strip()
+            # Remove grammar refs
+            after_pos = GRAMMAR_REF.sub('', after_pos).strip()
+            # Remove etymology
+            after_pos = ETYMOLOGY_PATTERN.sub('', after_pos).strip()
+            # Take text before any — dash (compound forms)
+            if '—' in after_pos:
+                after_pos = after_pos.split('—')[0].strip()
+            # Take text before "s.v." cross-reference
+            if 's.v.' in after_pos:
+                after_pos = after_pos.split('s.v.')[0].strip()
+            after_pos = after_pos.strip('.,;: ')
+            if after_pos and len(after_pos) > 2:
+                entry['english'].append(after_pos)
+
     # Extract etymology
     ety_match = ETYMOLOGY_PATTERN.search(text)
     if ety_match:
