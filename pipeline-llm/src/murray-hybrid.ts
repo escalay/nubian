@@ -19,8 +19,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY
-  || 'REDACTED';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const ai = createAiFn({
   provider: openrouter({ apiKey: OPENROUTER_API_KEY }),
