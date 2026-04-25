@@ -71,6 +71,8 @@ def ocr_columns(page_start: int, page_end: int, batch_size: int = 5):
 
     total = 0
     skipped = 0
+    failed = 0
+    failed_columns = []
 
     for page in range(page_start, page_end + 1):
         for col in [1, 2, 3]:
@@ -105,9 +107,16 @@ def ocr_columns(page_start: int, page_end: int, batch_size: int = 5):
                 dt = time.time() - t0
                 print(f"OK ({dt:.1f}s, {len(content)} chars)")
             except Exception as e:
+                failed += 1
+                failed_columns.append(f"p{page} col{col}")
                 print(f"ERROR: {e}")
 
-    print(f"\n  OCR complete: {total} new, {skipped} cached")
+    print(f"\n  OCR complete: {total} new, {skipped} cached, {failed} failed")
+    if failed:
+        print(f"  Failed columns: {', '.join(failed_columns[:20])}")
+        if len(failed_columns) > 20:
+            print(f"  ...and {len(failed_columns) - 20} more")
+        sys.exit(1)
 
 
 # ─────────────────────────────────────────────────────────────

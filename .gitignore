@@ -5,7 +5,9 @@ __pycache__/
 *.egg-info/
 
 # Pipeline output (regenerable, large)
-output/
+output/*
+!output/corpus/
+!output/corpus/**
 pipeline/ocr_output/
 
 # Environment

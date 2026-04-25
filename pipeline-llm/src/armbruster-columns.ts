@@ -18,6 +18,11 @@ import path from 'path';
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
+if (!OPENROUTER_API_KEY) {
+  console.error('Error: OPENROUTER_API_KEY is required for Armbruster LLM extraction.');
+  process.exit(1);
+}
+
 const ai = createAiFn({
   provider: openrouter({ apiKey: OPENROUTER_API_KEY }),
 });
@@ -119,19 +124,20 @@ RULES:
 // Main
 // ─────────────────────────────────────────────────────────────
 
-async function processPages(startPage: number, endPage: number) {
+async function processPages(startPage: number, endPage: number, force = false) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  let totalEntries = 0;
-  let totalColumns = 0;
+  let processedColumns = 0;
+  let cachedPages = 0;
+  const failedColumns: string[] = [];
 
   for (let page = startPage; page <= endPage; page++) {
     const pageOutPath = path.join(OUTPUT_DIR, `page_${String(page).padStart(4, '0')}.json`);
 
-    if (fs.existsSync(pageOutPath)) {
+    if (fs.existsSync(pageOutPath) && !force) {
       const cached = JSON.parse(fs.readFileSync(pageOutPath, 'utf-8'));
       const count = cached.entries?.length || 0;
-      totalEntries += count;
+      cachedPages++;
       console.log(`  p${page}: cached (${count} entries)`);
       continue;
     }
@@ -147,7 +153,7 @@ async function processPages(startPage: number, endPage: number) {
 
       try {
         const result = await extractColumn(colPath);
-        totalColumns++;
+        processedColumns++;
 
         for (const entry of result.entries) {
           pageEntries.push({
@@ -164,6 +170,7 @@ async function processPages(startPage: number, endPage: number) {
           console.log(`  p${page} col${col}: 0 entries`);
         }
       } catch (err) {
+        failedColumns.push(`p${page} col${col}`);
         console.error(`  p${page} col${col}: ERROR — ${(err as Error).message}`);
       }
 
@@ -183,18 +190,18 @@ async function processPages(startPage: number, endPage: number) {
     };
 
     fs.writeFileSync(pageOutPath, JSON.stringify(pageResult, null, 2));
-    totalEntries += pageEntries.length;
     console.log(`  p${page}: TOTAL ${pageEntries.length} entries`);
   }
 
-  // Save combined
+  // Save combined from every cached/generated page file, not just this run's range.
   const allEntries: any[] = [];
-  for (let page = startPage; page <= endPage; page++) {
-    const pageOutPath = path.join(OUTPUT_DIR, `page_${String(page).padStart(4, '0')}.json`);
-    if (fs.existsSync(pageOutPath)) {
-      const data = JSON.parse(fs.readFileSync(pageOutPath, 'utf-8'));
-      if (data.entries) allEntries.push(...data.entries);
-    }
+  const pageFiles = fs.readdirSync(OUTPUT_DIR)
+    .filter((file) => /^page_\d{4}\.json$/.test(file))
+    .sort();
+
+  for (const file of pageFiles) {
+    const data = JSON.parse(fs.readFileSync(path.join(OUTPUT_DIR, file), 'utf-8'));
+    if (data.entries) allEntries.push(...data.entries);
   }
 
   const combined = {
@@ -203,22 +210,34 @@ async function processPages(startPage: number, endPage: number) {
       method: 'Column-split canonical: 4x resolution, 3 columns per page, Gemini 3 Flash (thinking=high)',
       model: 'google/gemini-3-flash-preview',
       dialect: 'Dongolawi',
-      columns_processed: totalColumns,
+      page_files_combined: pageFiles.length,
+      cached_pages_this_run: cachedPages,
+      columns_processed_this_run: processedColumns,
+      failed_columns_this_run: failedColumns,
       total_entries: allEntries.length,
     },
     entries: allEntries,
   };
 
   fs.writeFileSync(path.join(OUTPUT_DIR, 'armbruster_columns.json'), JSON.stringify(combined, null, 2));
-  console.log(`\nSaved ${allEntries.length} entries (${totalColumns} columns) to armbruster_columns.json`);
+  console.log(`\nSaved ${allEntries.length} entries (${pageFiles.length} page files) to armbruster_columns.json`);
+
+  if (failedColumns.length > 0) {
+    console.error(`Failed columns: ${failedColumns.join(', ')}`);
+    process.exitCode = 1;
+  }
 }
 
 const args = process.argv.slice(2);
 let startPage = 19, endPage = 20;
+let force = false;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--pages' && args[i + 1]) {
     const [s, e] = args[i + 1].split('-').map(Number);
     startPage = s; endPage = e || s;
+  }
+  if (args[i] === '--force') {
+    force = true;
   }
 }
 
@@ -228,4 +247,4 @@ console.log(`  Columns: ${COLUMNS_DIR}`);
 console.log(`  Pages: ${startPage}-${endPage} (${(endPage - startPage + 1) * 3} columns)`);
 console.log();
 
-processPages(startPage, endPage);
+processPages(startPage, endPage, force);
